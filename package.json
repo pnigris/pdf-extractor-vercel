@@ -1,0 +1,8 @@
+{
+  "name": "pdf-extractor-vercel",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "pdf-parse": "^2.3.12"
+  }
+}
