@@ -5,7 +5,7 @@
 /* - atualizado com Prompt Master v1 em 3 partes + schema novo               */
 /* ************************************************************************* */
 
-import { LEGAL_PROMPT_V1 } from "../lib/prompts/legalPrompt.v1.js";
+const { LEGAL_PROMPT_V1 } = require("../lib/prompts/legalPrompt.v1.js");
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -233,7 +233,7 @@ function buildReportHtml({ fileName, meta, report }) {
 `.trim();
 }
 
-export default async function handler(req, res) {
+module.exports = async function handler(req, res) {
   setCors(res);
 
   if (req.method === 'OPTIONS') {
