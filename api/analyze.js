@@ -3,6 +3,14 @@
 /* Data da Criação: 23/01/2026                                               */
 /* Ultima Modificaçãoo: 26/01/2026                                           */
 /* - atualizado com Prompt Master v1 em 3 partes + schema novo               */
+/* - Implementação da função ajuste de hora para mostrar a geração correta   */
+/* ************************************************************************* */
+
+/* ************************************************************************* */
+/* Nome do codigo: api/analyze.js (Vercel)                                   */
+/* Data da Criação: 23/01/2026                                               */
+/* Ultima Modificaçãoo: 26/01/2026                                           */
+/* - atualizado com Prompt Master v1 em 3 partes + schema novo               */
 /* ************************************************************************* */
 
 const { LEGAL_PROMPT_V1 } = require("../lib/prompts/legalPrompt.v1.js");
@@ -99,9 +107,18 @@ function escapeHtml(s) {
     .replace(/'/g, '&#39;');
 }
 
+/* NOVO: formato determinístico em horário do Brasil (America/Sao_Paulo) */
+function formatSaoPauloDateTime(date = new Date()) {
+  return new Intl.DateTimeFormat('pt-BR', {
+    timeZone: 'America/Sao_Paulo',
+    dateStyle: 'short',
+    timeStyle: 'medium'
+  }).format(date);
+}
+
 function buildReportHtml({ fileName, meta, report }) {
   const title = `Relatório - ${normalizeFileName(fileName)}`;
-  const now = new Date().toISOString();
+  const now = formatSaoPauloDateTime(new Date());
 
   const metaHtml = (meta || []).map(x => `<li>${escapeHtml(x)}</li>`).join('');
   const obsFinais = sanitizeArray(report?.observacoes_finais, 20, 300);
