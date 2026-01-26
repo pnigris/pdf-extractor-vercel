@@ -1,8 +1,9 @@
 {
   "name": "pdf-extractor-vercel",
   "version": "1.0.0",
-  "type": "module",
   "dependencies": {
-    "pdf-parse": "^2.3.12"
+    "pdf-parse": "1.1.1",
+    "mammoth": "^1.7.2",
+    "word-extractor": "^1.0.4"
   }
 }
