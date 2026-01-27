@@ -13,7 +13,7 @@
 /* - atualizado com Prompt Master v1 em 3 partes + schema novo               */
 /* ************************************************************************* */
 
-const { LEGAL_PROMPT_V1 } = require("../lib/prompts/legalPrompt.v1.js");
+const { LEGAL_PROMPT_V1 } = require("../lib/prompts/legalPrompt.v2.js");
 
 function setCors(res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
