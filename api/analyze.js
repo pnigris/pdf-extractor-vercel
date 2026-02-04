@@ -5,7 +5,7 @@
 /* - blindagem: requestId + logs + timeouts + erros amigáveis                */
 /* ************************************************************************* */
 
-const { LEGAL_PROMPT_V1 } = require("../lib/prompts/legalPrompt.v2.js");
+const { LEGAL_PROMPT_V2 } = require("../lib/prompts/legalPrompt.v2.js");
 
 // ---------------------- Helpers: Infra ----------------------
 
@@ -513,9 +513,9 @@ module.exports = async function handler(req, res) {
     const MAX_INPUT_CHARS = 9000;
 
     const messages = [
-      { role: "system", content: LEGAL_PROMPT_V1.system },
-      { role: "system", content: LEGAL_PROMPT_V1.rules },
-      { role: "user", content: LEGAL_PROMPT_V1.task({ fileName, extractedText, maxChars: MAX_INPUT_CHARS }) }
+      { role: "system", content: LEGAL_PROMPT_V2.system },
+      { role: "system", content: LEGAL_PROMPT_V2.rules },
+      { role: "user", content: LEGAL_PROMPT_V2.task({ fileName, extractedText, maxChars: MAX_INPUT_CHARS }) }
     ];
 
     // 4) OpenAI Responses API com json_schema estrito (timeout)
