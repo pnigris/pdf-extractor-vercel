@@ -1,15 +1,31 @@
 /* ************************************************************************* */
 /* Nome do codigo: api/extract.js (Vercel)Trata arquivo PDF, DOCX e DOC      */
 /* Data da Criação: 23/01/2026                                               */
-/* Ultima Modificaçãoo: 23/01/2026                                           */
+/* Ultima Modificaçãoo: 04/02/2026                                           */
+/* - blindagem: requestId + CORS + OPTIONS + timeout download                */
 /* ************************************************************************* */
+
 const pdfParse = require("pdf-parse");
 const mammoth = require("mammoth");
 const WordExtractor = require("word-extractor");
 
-/**
- * Detecta o tipo de arquivo com base na extensão
- */
+function setCors(res) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Request-Id");
+  res.setHeader("Access-Control-Max-Age", "86400");
+}
+
+function safeJson(res, status, obj) {
+  res.status(status);
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(obj));
+}
+
+function makeRequestId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
 function guessType(downloadUrl, fileName) {
   const s = (fileName || downloadUrl || "").toLowerCase();
   if (s.endsWith(".pdf")) return "pdf";
@@ -18,32 +34,70 @@ function guessType(downloadUrl, fileName) {
   return "unknown";
 }
 
+async function readBodyJson(req) {
+  let body = req.body;
+  if (!body) return {};
+  if (typeof body === "string") {
+    try { return JSON.parse(body); } catch (_) { return {}; }
+  }
+  return body;
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { ...options, signal: controller.signal });
+    return r;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
 module.exports = async function handler(req, res) {
-  // Garantir que é um método POST
+  setCors(res);
+
+  const requestId = (req.headers["x-request-id"] || "").toString().trim() || makeRequestId();
+
+  if (req.method === "OPTIONS") {
+    res.status(200).end();
+    return;
+  }
+
   if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
+    return safeJson(res, 405, { ok: false, requestId, error: "Method not allowed" });
   }
 
   try {
-    let body = req.body;
-    if (typeof body === "string") {
-      try { body = JSON.parse(body); } catch (_) { body = {}; }
-    }
-
+    const body = await readBodyJson(req);
     const downloadUrl = body && body.downloadUrl;
     const fileName = body && body.fileName;
 
     if (!downloadUrl) {
-      return res.status(400).json({ error: "downloadUrl ausente" });
+      return safeJson(res, 400, { ok: false, requestId, error: "downloadUrl ausente" });
     }
 
     const type = guessType(downloadUrl, fileName);
 
-    // Download do arquivo
-    const r = await fetch(downloadUrl);
+    // Download do arquivo (timeout para evitar travar e virar 500)
+    let r;
+    try {
+      r = await fetchWithTimeout(downloadUrl, {}, 25000);
+    } catch (e) {
+      const isAbort = String(e?.name || "").toLowerCase().includes("abort");
+      return safeJson(res, isAbort ? 504 : 502, {
+        ok: false,
+        requestId,
+        error: isAbort ? "Timeout ao baixar o arquivo" : "Falha ao baixar o arquivo",
+        detail: String(e?.message || e)
+      });
+    }
+
     if (!r.ok) {
       const t = await r.text();
-      return res.status(400).json({
+      return safeJson(res, 400, {
+        ok: false,
+        requestId,
         error: `Falha ao baixar arquivo: HTTP ${r.status}`,
         detail: t.slice(0, 300)
       });
@@ -54,55 +108,64 @@ module.exports = async function handler(req, res) {
 
     // Limite de segurança (15MB)
     if (buffer.length > 15 * 1024 * 1024) {
-      return res.status(413).json({ error: "Arquivo muito grande (limite 15MB)" });
+      return safeJson(res, 413, { ok: false, requestId, error: "Arquivo muito grande (limite 15MB)" });
     }
 
-    // --- Lógica de Extração por Tipo ---
-
-    // 1. PDF
+    // 1) PDF
     if (type === "pdf") {
       const parsed = await pdfParse(buffer);
-      return res.status(200).json({
+      return safeJson(res, 200, {
+        ok: true,
+        requestId,
         kind: "pdf",
         text: (parsed?.text || "").trim(),
         pages: parsed?.numpages || null
       });
     }
 
-    // 2. DOCX (Word Moderno)
+    // 2) DOCX
     if (type === "docx") {
       const result = await mammoth.extractRawText({ buffer });
-      return res.status(200).json({
+      return safeJson(res, 200, {
+        ok: true,
+        requestId,
         kind: "docx",
         text: (result?.value || "").trim()
       });
     }
 
-    // 3. DOC (Word Antigo 97-2003)
+    // 3) DOC
     if (type === "doc") {
       try {
         const extractor = new WordExtractor();
         const extracted = await extractor.extract(buffer);
-        return res.status(200).json({
+        return safeJson(res, 200, {
+          ok: true,
+          requestId,
           kind: "doc",
           text: (extracted.getBody() || "").trim()
         });
-      } catch (errDoc) {
-        return res.status(422).json({
+      } catch (_) {
+        return safeJson(res, 422, {
+          ok: false,
+          requestId,
           error: "Erro ao processar arquivo .doc binário.",
           detail: "O arquivo pode estar corrompido ou protegido por senha."
         });
       }
     }
 
-    // Caso o tipo seja desconhecido
-    return res.status(400).json({
+    return safeJson(res, 400, {
+      ok: false,
+      requestId,
       error: "Tipo de arquivo não suportado.",
       hint: "O ValidaLex aceita apenas PDF, DOCX e DOC."
     });
 
   } catch (e) {
-    return res.status(500).json({
+    return safeJson(res, 500, {
+      ok: false,
+      requestId,
       error: "Erro interno no servidor de extração",
       detail: String(e?.message || e)
     });

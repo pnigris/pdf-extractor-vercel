@@ -1,19 +1,71 @@
 /* ************************************************************************* */
 /* Nome do codigo: api/analyze.js (Vercel)                                   */
 /* Data da Criação: 23/01/2026                                               */
-/* Ultima Modificaçãoo: 26/01/2026                                           */
-/* - atualizado com Prompt Master v1 em 3 partes + schema novo               */
-/* - Implementação da função ajuste de hora para mostrar a geração correta   */
+/* Ultima Modificaçãoo: 04/02/2026                                           */
+/* - blindagem: requestId + logs + timeouts + erros amigáveis                */
 /* ************************************************************************* */
 
 const { LEGAL_PROMPT_V1 } = require("../lib/prompts/legalPrompt.v2.js");
 
+// ---------------------- Helpers: Infra ----------------------
+
 function setCors(res) {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-  res.setHeader('Access-Control-Max-Age', '86400');
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Request-Id");
+  res.setHeader("Access-Control-Max-Age", "86400");
 }
+
+function safeJson(res, status, obj) {
+  res.status(status);
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(obj));
+}
+
+function makeRequestId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 10)}`;
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function logJson(obj) {
+  try {
+    console.log(JSON.stringify(obj));
+  } catch (_) {
+    console.log(String(obj));
+  }
+}
+
+function getBaseUrl(req) {
+  const proto = (req.headers["x-forwarded-proto"] || "https").toString();
+  const host = (req.headers["x-forwarded-host"] || req.headers.host || "").toString();
+  return host ? `${proto}://${host}` : "";
+}
+
+async function readBodyJson(req) {
+  // Vercel geralmente já popula req.body; mas pode vir como string
+  let body = req.body;
+  if (!body) return {};
+  if (typeof body === "string") {
+    try { return JSON.parse(body); } catch (_) { return {}; }
+  }
+  return body;
+}
+
+async function fetchWithTimeout(url, options, timeoutMs) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const r = await fetch(url, { ...options, signal: controller.signal });
+    return r;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+// ---------------------- Helpers: JSON robust ----------------------
 
 function tryJsonRepair(s) {
   if (!s) return s;
@@ -21,13 +73,13 @@ function tryJsonRepair(s) {
   const fenced = s.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
   let t = fenced ? fenced[1] : s;
 
-  const start = t.indexOf('{');
-  const end = t.lastIndexOf('}');
+  const start = t.indexOf("{");
+  const end = t.lastIndexOf("}");
   if (start !== -1 && end !== -1 && end > start) t = t.slice(start, end + 1);
 
-  t = t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '');
+  t = t.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "");
   t = t.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
-  t = t.replace(/,\s*([}\]])/g, '$1');
+  t = t.replace(/,\s*([}\]])/g, "$1");
 
   return t;
 }
@@ -38,7 +90,7 @@ function pickStructuredOutputRobust(aiData) {
   for (const item of output) {
     if (item?.type !== "message") continue;
     const arr = item?.content || [];
-    const found = arr.find(c => c?.type === "output_json" && c?.json);
+    const found = arr.find((c) => c?.type === "output_json" && c?.json);
     if (found?.json) return { ok: true, json: found.json, source: "output_json" };
   }
 
@@ -47,7 +99,7 @@ function pickStructuredOutputRobust(aiData) {
     for (const item of output) {
       if (item?.type !== "message") continue;
       const arr = item?.content || [];
-      const chunk = arr.find(c => c?.type === "output_text" && typeof c?.text === "string");
+      const chunk = arr.find((c) => c?.type === "output_text" && typeof c?.text === "string");
       if (chunk?.text) { outText = chunk.text; break; }
     }
   }
@@ -74,38 +126,34 @@ function pickStructuredOutputRobust(aiData) {
   }
 }
 
+// ---------------------- Helpers: Sanitização/HTML (seu código) ----------------------
+
 function sanitizeArray(arr, maxItems, maxLen) {
   if (!Array.isArray(arr)) return [];
-  const out = arr.map(x => String(x || '').trim()).filter(Boolean);
-  const cut = typeof maxItems === 'number' ? out.slice(0, maxItems) : out;
-  return typeof maxLen === 'number' ? cut.map(x => x.slice(0, maxLen)) : cut;
-}
-
-function sanitizeEnum(v, allowed, fallback) {
-  const s = String(v || '').trim().toLowerCase();
-  return allowed.includes(s) ? s : fallback;
+  const out = arr.map((x) => String(x || "").trim()).filter(Boolean);
+  const cut = typeof maxItems === "number" ? out.slice(0, maxItems) : out;
+  return typeof maxLen === "number" ? cut.map((x) => x.slice(0, maxLen)) : cut;
 }
 
 function normalizeFileName(name) {
   const base = String(name || "arquivo").trim();
-  return base.replace(/[\\/:*?"<>|]+/g, '-').slice(0, 80);
+  return base.replace(/[\\/:*?"<>|]+/g, "-").slice(0, 80);
 }
 
 function escapeHtml(s) {
-  return String(s || '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+  return String(s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
-/* NOVO: formato determinístico em horário do Brasil (America/Sao_Paulo) */
 function formatSaoPauloDateTime(date = new Date()) {
-  return new Intl.DateTimeFormat('pt-BR', {
-    timeZone: 'America/Sao_Paulo',
-    dateStyle: 'short',
-    timeStyle: 'medium'
+  return new Intl.DateTimeFormat("pt-BR", {
+    timeZone: "America/Sao_Paulo",
+    dateStyle: "short",
+    timeStyle: "medium"
   }).format(date);
 }
 
@@ -113,7 +161,7 @@ function buildReportHtml({ fileName, meta, report }) {
   const title = `Relatório - ${normalizeFileName(fileName)}`;
   const now = formatSaoPauloDateTime(new Date());
 
-  const metaHtml = (meta || []).map(x => `<li>${escapeHtml(x)}</li>`).join('');
+  const metaHtml = (meta || []).map((x) => `<li>${escapeHtml(x)}</li>`).join("");
   const obsFinais = sanitizeArray(report?.observacoes_finais, 20, 300);
 
   const qualidade = report?.qualidade_do_texto || {};
@@ -123,38 +171,38 @@ function buildReportHtml({ fileName, meta, report }) {
   const riscos = Array.isArray(report?.riscos) ? report.riscos : [];
   const lacunas = Array.isArray(report?.lacunas_e_perguntas) ? report.lacunas_e_perguntas : [];
 
-  const elemRows = elementos.map(e => `
+  const elemRows = elementos.map((e) => `
     <tr>
-      <td>${escapeHtml(e?.elemento || '')}</td>
-      <td>${escapeHtml(e?.status || '')}</td>
-      <td>${escapeHtml(e?.evidencia_trecho || '')}</td>
+      <td>${escapeHtml(e?.elemento || "")}</td>
+      <td>${escapeHtml(e?.status || "")}</td>
+      <td>${escapeHtml(e?.evidencia_trecho || "")}</td>
     </tr>
-  `.trim()).join('');
+  `.trim()).join("");
 
-  const riscosRows = riscos.map(r => `
+  const riscosRows = riscos.map((r) => `
     <tr>
-      <td>${escapeHtml(r?.risco || '')}</td>
-      <td>${escapeHtml(r?.nivel || '')}</td>
-      <td>${escapeHtml(r?.fato_textual_evidencia || '')}</td>
-      <td>${escapeHtml((Array.isArray(r?.inferencias) ? r.inferencias.join(' | ') : ''))}</td>
-      <td>${escapeHtml(r?.impacto_pratico || '')}</td>
-      <td>${escapeHtml(r?.mitigacao_recomendada || '')}</td>
+      <td>${escapeHtml(r?.risco || "")}</td>
+      <td>${escapeHtml(r?.nivel || "")}</td>
+      <td>${escapeHtml(r?.fato_textual_evidencia || "")}</td>
+      <td>${escapeHtml((Array.isArray(r?.inferencias) ? r.inferencias.join(" | ") : ""))}</td>
+      <td>${escapeHtml(r?.impacto_pratico || "")}</td>
+      <td>${escapeHtml(r?.mitigacao_recomendada || "")}</td>
     </tr>
-  `.trim()).join('');
+  `.trim()).join("");
 
-  const lacRows = lacunas.map(l => `
+  const lacRows = lacunas.map((l) => `
     <tr>
-      <td>${escapeHtml(l?.ponto || '')}</td>
-      <td>${escapeHtml(l?.status || '')}</td>
-      <td>${escapeHtml(l?.por_que_importa || '')}</td>
-      <td>${escapeHtml(l?.pergunta_objetiva || '')}</td>
+      <td>${escapeHtml(l?.ponto || "")}</td>
+      <td>${escapeHtml(l?.status || "")}</td>
+      <td>${escapeHtml(l?.por_que_importa || "")}</td>
+      <td>${escapeHtml(l?.pergunta_objetiva || "")}</td>
     </tr>
-  `.trim()).join('');
+  `.trim()).join("");
 
   const cls = report?.doc_classification || {};
 
-  const obsFinaisHtml = obsFinais.map(x => `<li>${escapeHtml(x)}</li>`).join('');
-  const qualObsHtml = qualObs.map(x => `<li>${escapeHtml(x)}</li>`).join('');
+  const obsFinaisHtml = obsFinais.map((x) => `<li>${escapeHtml(x)}</li>`).join("");
+  const qualObsHtml = qualObs.map((x) => `<li>${escapeHtml(x)}</li>`).join("");
 
   return `
 <!doctype html>
@@ -189,13 +237,13 @@ function buildReportHtml({ fileName, meta, report }) {
 
   <div class="card">
     <b>Classificação</b>
-    <p><b>Tipo:</b> ${escapeHtml(cls?.tipo || '')} &nbsp; <b>Área:</b> ${escapeHtml(cls?.area || '')} &nbsp; <b>Confiança:</b> ${escapeHtml(String(cls?.confianca ?? ''))}</p>
+    <p><b>Tipo:</b> ${escapeHtml(cls?.tipo || "")} &nbsp; <b>Área:</b> ${escapeHtml(cls?.area || "")} &nbsp; <b>Confiança:</b> ${escapeHtml(String(cls?.confianca ?? ""))}</p>
   </div>
 
   <div class="card">
     <b>Qualidade do texto</b>
-    <p><b>Status:</b> ${escapeHtml(qualidade?.status || '')}</p>
-    <ul>${qualObsHtml || '<li>Sem observações.</li>'}</ul>
+    <p><b>Status:</b> ${escapeHtml(qualidade?.status || "")}</p>
+    <ul>${qualObsHtml || "<li>Sem observações.</li>"}</ul>
   </div>
 
   <div class="card">
@@ -235,7 +283,7 @@ function buildReportHtml({ fileName, meta, report }) {
 
   <div class="card">
     <b>Observações finais</b>
-    <ul>${obsFinaisHtml || '<li>Sem observações finais.</li>'}</ul>
+    <ul>${obsFinaisHtml || "<li>Sem observações finais.</li>"}</ul>
   </div>
 
 </body>
@@ -243,51 +291,98 @@ function buildReportHtml({ fileName, meta, report }) {
 `.trim();
 }
 
+// ---------------------- Handler ----------------------
+
 module.exports = async function handler(req, res) {
   setCors(res);
 
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+  const requestId = (req.headers["x-request-id"] || "").toString().trim() || makeRequestId();
+
+  if (req.method === "OPTIONS") {
+    res.status(200).end();
+    return;
   }
 
+  const startedAt = Date.now();
+
   try {
-    if (req.method !== 'POST') {
-      return res.status(405).json({ error: 'Method not allowed' });
+    logJson({ level: "info", event: "REQ_START", ts: nowIso(), requestId, path: req.url, method: req.method });
+
+    if (req.method !== "POST") {
+      return safeJson(res, 405, { ok: false, requestId, error: "Method not allowed" });
     }
 
-    // IMPORTANTE: não aceitar prompt vindo do cliente
-    const { downloadUrl, fileName } = req.body || {};
-    if (!downloadUrl) return res.status(400).json({ error: 'downloadUrl ausente' });
+    const body = await readBodyJson(req);
+    const { downloadUrl, fileName } = body || {};
+
+    if (!downloadUrl) {
+      return safeJson(res, 400, { ok: false, requestId, error: "downloadUrl ausente" });
+    }
 
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-    if (!OPENAI_API_KEY) return res.status(500).json({ error: 'OPENAI_API_KEY ausente no env da Vercel' });
+    if (!OPENAI_API_KEY) {
+      return safeJson(res, 500, { ok: false, requestId, error: "OPENAI_API_KEY ausente no env da Vercel" });
+    }
 
-    // 1) Extrai texto chamando /api/extract no mesmo projeto Vercel
-    const base = `https://${req.headers.host}`;
-    const extractResp = await fetch(`${base}/api/extract`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ downloadUrl, fileName })
-    });
+    // 1) Extrai texto via /api/extract (mesmo projeto)
+    const base = getBaseUrl(req);
+    if (!base) {
+      return safeJson(res, 500, { ok: false, requestId, error: "BaseUrl não detectada (headers host ausentes)" });
+    }
+
+    let extractResp;
+    try {
+      extractResp = await fetchWithTimeout(
+        `${base}/api/extract`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-Request-Id": requestId },
+          body: JSON.stringify({ downloadUrl, fileName })
+        },
+        25000
+      );
+    } catch (e) {
+      const isAbort = String(e?.name || "").toLowerCase().includes("abort");
+      return safeJson(res, isAbort ? 504 : 502, {
+        ok: false,
+        requestId,
+        error: isAbort ? "Timeout ao extrair texto do documento" : "Falha ao chamar serviço de extração",
+        detail: String(e?.message || e)
+      });
+    }
 
     const extractRaw = await extractResp.text();
     if (!extractResp.ok) {
-      return res.status(extractResp.status).json({ error: 'Falha no extract', detail: extractRaw.slice(0, 1200) });
+      return safeJson(res, extractResp.status, {
+        ok: false,
+        requestId,
+        error: "Falha no extract",
+        detail: extractRaw.slice(0, 1200)
+      });
     }
 
     let extract;
     try { extract = JSON.parse(extractRaw); }
-    catch (_) { return res.status(500).json({ error: 'extract retornou não-JSON', detail: extractRaw.slice(0, 1200) }); }
+    catch (_) {
+      return safeJson(res, 502, {
+        ok: false,
+        requestId,
+        error: "extract retornou não-JSON",
+        detail: extractRaw.slice(0, 1200)
+      });
+    }
 
-    const extractedText = String(extract?.text || '').trim();
-    const kind = extract?.kind || 'unknown';
+    const extractedText = String(extract?.text || "").trim();
+    const kind = extract?.kind || "unknown";
     const pages = extract?.pages ?? null;
 
     const meta = [
-      `Arquivo: ${fileName || 'arquivo'}`,
-      `Extraído via ValidaLex Extrator: ${kind}${pages ? ` (${pages} pág.)` : ''}`
+      `Arquivo: ${fileName || "arquivo"}`,
+      `Extraído via ValidaLex Extrator: ${kind}${pages ? ` (${pages} pág.)` : ""}`,
+      `requestId: ${requestId}`
     ];
 
+    // fallback determinístico quando texto é insuficiente
     if (extractedText.length < 80) {
       const minimal = {
         doc_classification: { tipo: "Indeterminado", area: "Indeterminada", confianca: 0 },
@@ -308,7 +403,7 @@ module.exports = async function handler(req, res) {
             ponto: "Conteúdo do documento não está disponível no texto extraído",
             status: "ausente",
             por_que_importa: "Sem o conteúdo, não é possível validar estrutura, obrigações e riscos.",
-            pergunta_objetiva: "O documento original possui texto selecionável? Há versão .docx?"
+            pergunta_objetiva: "O documento original possui texto selecionável? Há versão .docx? O arquivo está protegido?"
           }
         ],
         observacoes_finais: [...meta]
@@ -316,14 +411,18 @@ module.exports = async function handler(req, res) {
 
       const reportHtml = buildReportHtml({ fileName, meta, report: minimal });
 
-      return res.status(200).json({
+      logJson({ level: "info", event: "REQ_OK_MINIMAL", ts: nowIso(), requestId, ms: Date.now() - startedAt });
+
+      return safeJson(res, 200, {
+        ok: true,
+        requestId,
         report: minimal,
         reportHtml,
         reportFileName: `relatorio-${normalizeFileName(fileName)}.html`
       });
     }
 
-    // 2) Schema novo (rigoroso) alinhado ao prompt
+    // 2) Schema novo (rigoroso) alinhado ao prompt V1 (mantido)
     const schema = {
       type: "object",
       additionalProperties: false,
@@ -410,7 +509,7 @@ module.exports = async function handler(req, res) {
       required: ["doc_classification", "qualidade_do_texto", "elementos_essenciais", "riscos", "lacunas_e_perguntas", "observacoes_finais"]
     };
 
-    // 3) Mensagens (3 partes) + task
+    // 3) Mensagens + task
     const MAX_INPUT_CHARS = 9000;
 
     const messages = [
@@ -419,41 +518,70 @@ module.exports = async function handler(req, res) {
       { role: "user", content: LEGAL_PROMPT_V1.task({ fileName, extractedText, maxChars: MAX_INPUT_CHARS }) }
     ];
 
-    // 4) OpenAI Responses API com json_schema estrito
-    const aiResp = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENAI_API_KEY}`
-      },
-      body: JSON.stringify({
-        model: "gpt-4o-mini",
-        temperature: 0.2,
-        max_output_tokens: 1200,
-        input: messages,
-        text: {
-          format: {
-            type: "json_schema",
-            strict: true,
-            name: "relatorio_validacao_juridica_v1",
-            schema
-          }
-        }
-      })
-    });
+    // 4) OpenAI Responses API com json_schema estrito (timeout)
+    let aiResp;
+    try {
+      aiResp = await fetchWithTimeout(
+        "https://api.openai.com/v1/responses",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${OPENAI_API_KEY}`
+          },
+          body: JSON.stringify({
+            model: "gpt-4o-mini",
+            temperature: 0.2,
+            max_output_tokens: 1200,
+            input: messages,
+            text: {
+              format: {
+                type: "json_schema",
+                strict: true,
+                name: "relatorio_validacao_juridica_v1",
+                schema
+              }
+            }
+          })
+        },
+        30000
+      );
+    } catch (e) {
+      const isAbort = String(e?.name || "").toLowerCase().includes("abort");
+      return safeJson(res, isAbort ? 504 : 502, {
+        ok: false,
+        requestId,
+        error: isAbort ? "Timeout ao gerar análise jurídica (IA)" : "Falha ao chamar OpenAI",
+        detail: String(e?.message || e)
+      });
+    }
 
     const aiRaw = await aiResp.text();
     if (!aiResp.ok) {
-      return res.status(aiResp.status).json({ error: "OpenAI erro", detail: aiRaw.slice(0, 1200) });
+      return safeJson(res, aiResp.status, {
+        ok: false,
+        requestId,
+        error: "OpenAI erro",
+        detail: aiRaw.slice(0, 1200)
+      });
     }
 
     let aiData;
     try { aiData = JSON.parse(aiRaw); }
-    catch (_) { return res.status(500).json({ error: "OpenAI retornou não-JSON", detail: aiRaw.slice(0, 1200) }); }
+    catch (_) {
+      return safeJson(res, 502, {
+        ok: false,
+        requestId,
+        error: "OpenAI retornou não-JSON",
+        detail: aiRaw.slice(0, 1200)
+      });
+    }
 
     const picked = pickStructuredOutputRobust(aiData);
     if (!picked.ok) {
-      return res.status(502).json({
+      return safeJson(res, 502, {
+        ok: false,
+        requestId,
         error: "OpenAI retornou saída não-parseável",
         code: picked.code,
         detail: picked.detail,
@@ -462,13 +590,10 @@ module.exports = async function handler(req, res) {
       });
     }
 
-    /** @type {any} */
     const report = picked.json || {};
 
-    // 5) Sanitização leve (garantia extra)
+    // 5) Sanitização leve + metadados finais
     report.observacoes_finais = sanitizeArray(report.observacoes_finais, 20, 260);
-
-    // Força metadados no final (auditabilidade)
     const fullFinalObs = [...meta, ...(Array.isArray(report.observacoes_finais) ? report.observacoes_finais : [])];
     report.observacoes_finais = fullFinalObs.slice(0, 20);
 
@@ -476,13 +601,32 @@ module.exports = async function handler(req, res) {
     const reportHtml = buildReportHtml({ fileName, meta, report });
     const reportFileName = `relatorio-${normalizeFileName(fileName)}.html`;
 
-    return res.status(200).json({
+    logJson({ level: "info", event: "REQ_OK", ts: nowIso(), requestId, ms: Date.now() - startedAt });
+
+    return safeJson(res, 200, {
+      ok: true,
+      requestId,
       report,
       reportHtml,
       reportFileName
     });
 
   } catch (err) {
-    return res.status(500).json({ error: 'Unhandled', message: String(err?.message || err) });
+    // Nunca mais “500 cego”
+    logJson({
+      level: "error",
+      event: "REQ_ERR",
+      ts: nowIso(),
+      requestId,
+      message: String(err?.message || err),
+      stack: String(err?.stack || "").slice(0, 2500),
+      ms: Date.now() - startedAt
+    });
+
+    return safeJson(res, 500, {
+      ok: false,
+      requestId,
+      error: "Falha interna ao processar o documento. Tente novamente. Se persistir, informe o requestId."
+    });
   }
-}
+};
