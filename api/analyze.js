@@ -6,13 +6,6 @@
 /* - Implementação da função ajuste de hora para mostrar a geração correta   */
 /* ************************************************************************* */
 
-/* ************************************************************************* */
-/* Nome do codigo: api/analyze.js (Vercel)                                   */
-/* Data da Criação: 23/01/2026                                               */
-/* Ultima Modificaçãoo: 26/01/2026                                           */
-/* - atualizado com Prompt Master v1 em 3 partes + schema novo               */
-/* ************************************************************************* */
-
 const { LEGAL_PROMPT_V1 } = require("../lib/prompts/legalPrompt.v2.js");
 
 function setCors(res) {
